@@ -49,6 +49,8 @@ activate_account() {
       return
     fi
     echo "$output"
+    echo "Waiting 600 Seconds before retry"
+    sleep 600
     exit 1
   fi
 
