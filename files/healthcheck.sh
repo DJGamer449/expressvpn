@@ -1,75 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 
-xvpn_cmd() {
-    expressvpnctl "$@"
+TARGET="${SERVER:-smart}"
+WAIT_SECONDS="${HEALTHCHECK_RECONNECT_WAIT:-15}"
+
+is_connected() {
+  [[ "$(expressvpnctl get connectionstate 2>/dev/null || true)" == "Connected" ]] && [[ -d /sys/class/net/tun0 ]]
 }
 
-resolve_check_ip() {
-    if [[ ${DDNS+x} ]]; then
-        [[ -z ${DDNS:-} ]] && return
-
-        local resolved
-        resolved=$(getent ahostsv4 "$DDNS" 2>/dev/null | awk 'NR==1 { print $1 }') || true
-        if [[ -z $resolved ]]; then
-            # Fallback to any family (likely IPv6) so we still perform the check
-            resolved=$(getent hosts "$DDNS" 2>/dev/null | awk 'NR==1 { print $1 }') || true
-        fi
-        [[ -n $resolved ]] && echo "$resolved"
-        return
-    fi
-
-    if [[ -n ${IP:-} ]]; then
-        echo "$IP"
-    fi
-}
-
-notify_healthcheck() {
-    local suffix="$1"
-    [[ -z ${HEALTHCHECK:-} ]] && return
-
-    curl -fsS --max-time 10 "https://hc-ping.com/${HEALTHCHECK}${suffix}"
+try_reconnect() {
+  expressvpnctl connect "$TARGET" >/dev/null 2>&1 || return 1
+  local i
+  for i in $(seq 1 "$WAIT_SECONDS"); do
+    is_connected && return 0
+    sleep 1
+  done
+  return 1
 }
 
 main() {
-    local failure_flag="/tmp/expressvpn/reconnect-failure.flag"
-    if [[ -f "${failure_flag}" ]]; then
-        notify_healthcheck "/fail" || true
-        exit 1
-    fi
+  expressvpnctl status >/dev/null 2>&1 || exit 1
 
-    local target_ip
-    target_ip=$(resolve_check_ip || true)
-
-    if [[ -z $target_ip ]]; then
-        if [[ ${DDNS+x} ]]; then
-            notify_healthcheck "/fail" || true
-            exit 1
-        fi
-
-        exit 0
-    fi
-
-    local express_ip
-    if ! express_ip=$(curl -fsSL --max-time 10 -H "Authorization: Bearer ${BEARER:-}" "https://ipinfo.io" | jq -r '.ip'); then
-        notify_healthcheck "/fail" || true
-        exit 1
-    fi
-
-    if [[ -z $express_ip || $express_ip == "null" ]]; then
-        notify_healthcheck "/fail" || true
-        exit 1
-    fi
-
-    if [[ "$target_ip" == "$express_ip" ]]; then
-        notify_healthcheck "/fail" || true
-        xvpn_cmd disconnect || true
-        xvpn_cmd connect "${SERVER:-smart}" || true
-        exit 1
-    fi
-
-    notify_healthcheck "" || true
+  if is_connected; then
     exit 0
+  fi
+
+  try_reconnect || exit 1
 }
 
 main
